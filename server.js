@@ -7,6 +7,9 @@ const http = require("http");
 
 // 로그 데이터를 메모리에 저장 (실제 프로덕션에서는 DB 사용)
 let logs = [];
+// 최근 로그 전송 시간 (비디오/카메라별) 추적하여 빈도 제한
+const lastLogEmittedAtByVideoId = new Map();
+const LOG_MIN_INTERVAL_MS = parseInt(process.env.LOG_MIN_INTERVAL_MS || "30000", 10); // 기본 30초
 
 // 로그 생성 함수
 const createLog = (alertData, analysisResult, category = "behavior") => {
@@ -320,38 +323,97 @@ io.on("connection", (socket) => {
         alertMessage = `Camera system issue detected: ${alertTitle.toLowerCase()}`;
       }
 
-      if (shouldCreateAlert) {
-        const alertData = {
-          id: `alert_${Date.now()}_${socket.id}`,
-          type: alertType,
-          severity: alertSeverity,
-          title: alertTitle,
-          message: alertMessage,
-          videoId: frameData.videoId,
-          videoTime: frameData.videoTime,
-          cattleData: analysisResult.cattle,
-          timestamp: new Date().toISOString(),
-          createdAt: new Date(),
-          confidence: Math.random() * 0.4 + 0.6, // 0.6-1.0
-          location: `Camera ${Math.floor(Math.random() * 4) + 1}`,
-        };
+      // 30초 빈도 제한 체크 (비디오별)
+      const videoKey = frameData.videoId || socket.id;
+      const now = Date.now();
+      const lastAt = lastLogEmittedAtByVideoId.get(videoKey) || 0;
+
+      if (now - lastAt >= LOG_MIN_INTERVAL_MS) {
+        // 알림 또는 정상 로그 생성
+        let alertData;
+
+        if (shouldCreateAlert) {
+          alertData = {
+            id: `alert_${Date.now()}_${socket.id}`,
+            type: alertType,
+            severity: alertSeverity,
+            title: alertTitle,
+            message: alertMessage,
+            videoId: frameData.videoId,
+            videoTime: frameData.videoTime,
+            cattleData: analysisResult.cattle,
+            timestamp: new Date().toISOString(),
+            createdAt: new Date(),
+            confidence: Math.random() * 0.4 + 0.6, // 0.6-1.0
+            location: `Camera ${Math.floor(Math.random() * 4) + 1}`,
+          };
+        } else {
+          // 정상 운영 로그 (종류를 다양화)
+          const normalVariants = [
+            {
+              category: "behavior",
+              title: "Normal Activity",
+              message: "Cattle behavior within normal range",
+            },
+            {
+              category: "camera",
+              title: "Routine Check Passed",
+              message: "Camera system operating normally",
+            },
+            {
+              category: "weather",
+              title: "Stable Weather",
+              message: "Weather conditions are stable in the farm area",
+            },
+            {
+              category: "sound",
+              title: "Ambient Sound Normal",
+              message: "No unusual sound detected",
+            },
+          ];
+          const pick = normalVariants[Math.floor(Math.random() * normalVariants.length)];
+          alertCategory = pick.category;
+          alertType = `${pick.category}_status`;
+          alertSeverity = "low";
+          alertTitle = pick.title;
+          alertMessage = pick.message;
+
+          alertData = {
+            id: `normal_${Date.now()}_${socket.id}`,
+            type: alertType,
+            severity: alertSeverity,
+            title: alertTitle,
+            message: alertMessage,
+            videoId: frameData.videoId,
+            videoTime: frameData.videoTime,
+            cattleData: analysisResult.cattle,
+            timestamp: new Date().toISOString(),
+            createdAt: new Date(),
+            confidence: Math.random() * 0.2 + 0.7,
+            location: `Camera ${Math.floor(Math.random() * 4) + 1}`,
+          };
+        }
+
+        const finalAlertData = alertData;
 
         console.log("🚨 Alert generated:", {
-          type: alertData.type,
-          severity: alertData.severity,
-          message: alertData.message,
-          videoId: alertData.videoId,
-          videoTime: alertData.videoTime,
+          type: finalAlertData.type,
+          severity: finalAlertData.severity,
+          message: finalAlertData.message,
+          videoId: finalAlertData.videoId,
+          videoTime: finalAlertData.videoTime,
           cattleCount: analysisResult.cattle_count,
         });
 
         // 1. 로그 생성
-        const newLog = createLog(alertData, analysisResult, alertCategory);
+        const newLog = createLog(finalAlertData, analysisResult, alertCategory);
         console.log("📝 Log created and added to backend memory, total logs:", logs.length);
 
-        // 2. 실시간 알림 전송
-        socket.emit("abnormal_behavior_alert", alertData);
-        console.log("📡 Sent abnormal_behavior_alert to client:", socket.id);
+        // 2. 실시간 알림 전송 (정상 로그는 알림 생략 가능)
+        if (shouldCreateAlert) {
+          socket.emit("abnormal_behavior_alert", finalAlertData);
+          console.log("📡 Sent abnormal_behavior_alert to client:", socket.id);
+        }
 
         // 3. 로그 업데이트 전송
         socket.emit("log_update", newLog);
@@ -378,8 +440,8 @@ io.on("connection", (socket) => {
           console.error("❌ Failed to save alert to database:", dbError);
         }
 
-        // 3. 로그 패널 업데이트
-        socket.emit("log_update", alertData);
+        // 3. 빈도 제한 기록 업데이트 (중복 방지)
+        lastLogEmittedAtByVideoId.set(videoKey, now);
       }
 
       // 일반 분석 결과 전송
